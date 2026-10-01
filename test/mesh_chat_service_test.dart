@@ -19,15 +19,20 @@ class FakeTransport implements MeshTransport {
   /// Endpoints advertised by simulated neighbours.
   final Map<String, String> remoteEndpoints = {};
 
-  /// Tokens that incoming connections will offer.
-  final Map<String, String> offeredTokens = {};
-
   final List<(String endpointId, Uint8List bytes)> sent = [];
-  final List<String> rejected = [];
   final List<String> disconnected = [];
 
   /// Set to make the next platform call fail, exercising the error path.
   bool failNext = false;
+
+  /// Nick names each transport call was made under, to prove the credential
+  /// name is what actually goes out on the wire.
+  String? advertiseNickName;
+  String? discoveryNickName;
+  String? requestedNickName;
+
+  final List<String> accepted = [];
+  final List<String> rejected = [];
 
   /// When true every platform call fails, as it does when the user denies the
   /// nearby-devices permission.
@@ -64,6 +69,7 @@ class FakeTransport implements MeshTransport {
     this.onConnectionInitiated = onConnectionInitiated;
     this.onConnectionResult = onConnectionResult;
     this.onDisconnected = onDisconnected;
+    advertiseNickName = nickName;
     return _maybeFail();
   }
 
@@ -79,6 +85,7 @@ class FakeTransport implements MeshTransport {
     required OnEndpointLost onEndpointLost,
   }) async {
     discovering = true;
+    discoveryNickName = nickName;
     this.onEndpointFound = onEndpointFound;
     this.onEndpointLost = onEndpointLost;
     return _maybeFail();
@@ -95,6 +102,7 @@ class FakeTransport implements MeshTransport {
     required OnConnectionResult onConnectionResult,
     required OnDisconnected onDisconnected,
   }) async {
+    requestedNickName = nickName;
     this.onConnectionInitiated = onConnectionInitiated;
     this.onConnectionResult = onConnectionResult;
     this.onDisconnected = onDisconnected;
@@ -106,6 +114,7 @@ class FakeTransport implements MeshTransport {
     String endpointId, {
     required OnPayloadReceived onPayloadReceived,
   }) async {
+    accepted.add(endpointId);
     this.onPayloadReceived = onPayloadReceived;
     return _maybeFail();
   }
@@ -144,12 +153,29 @@ class FakeTransport implements MeshTransport {
     onEndpointFound?.call(endpointId, name, serviceId ?? MeshChatService.serviceId);
   }
 
+  /// The endpoint name a genuine mesh peer presents over the radio.
+  static String presentedNameOf(String deviceName) =>
+      '${MeshChatService.protocolTag}:${MeshChatService.pairingSecret}:$deviceName';
+
   /// Pretends a remote device initiated the handshake.
-  void emitIncomingConnection(String endpointId, String name, String token) {
+  ///
+  /// The plugin's two-argument `requestConnection` leaves the authentication
+  /// token empty, so [token] defaults to the value the real plugin sends and the
+  /// credential genuinely travels in the endpoint name. A genuine peer's
+  /// presented name is derived from [name]; pass [presentedName] to simulate a
+  /// device that does not hold the pairing secret.
+  void emitIncomingConnection(String endpointId, String name,
+      {String? token, String? presentedName}) {
     onConnectionInitiated?.call(
       endpointId,
-      ConnectionInfo(name, token, true),
+      ConnectionInfo(presentedName ?? presentedNameOf(name), token ?? '', true),
     );
+  }
+
+  /// Emits the local side of an outgoing request, which the plugin also
+  /// reports back to the requester with `isIncomingConnection` false.
+  void emitOutgoingConnectionEcho(String endpointId, String name) {
+    onConnectionInitiated?.call(endpointId, ConnectionInfo(name, '', false));
   }
 
   /// Decodes a payload the service wrote onto the wire.
@@ -371,13 +397,14 @@ void main() {
       expect(service.peers.first.status, PeerStatus.handshaking);
     });
 
-    test('accepts an incoming peer presenting a mesh token', () async {
+    test('accepts an incoming peer holding the pairing secret', () async {
       final transport = FakeTransport();
       final service = buildService(transport);
       addTearDown(service.dispose);
       await service.startMesh();
 
-      transport.emitIncomingConnection('peer-9', 'PixelB', 'mesh:token-123');
+      // No token, exactly as the real plugin reports it.
+      transport.emitIncomingConnection('peer-9', 'PixelB');
       await Future<void>.delayed(Duration.zero);
 
       expect(transport.rejected, isEmpty);
@@ -387,20 +414,97 @@ void main() {
       );
     });
 
-    test('rejects an incoming peer with a foreign token', () async {
+    test('the accepted peer is shown its friendly name, not the credential',
+        () async {
       final transport = FakeTransport();
       final service = buildService(transport);
       addTearDown(service.dispose);
       await service.startMesh();
 
-      transport.emitIncomingConnection('peer-9', 'Impostor', 'other:abc');
+      transport.emitIncomingConnection('peer-9', 'PixelB');
+      await Future<void>.delayed(Duration.zero);
+
+      final peer = service.peers.firstWhere((p) => p.endpointId == 'peer-9');
+      expect(peer.name, 'PixelB');
+      expect(peer.name, isNot(contains(MeshChatService.pairingSecret)));
+    });
+
+    test('rejects a peer from the same app holding a wrong secret', () async {
+      final transport = FakeTransport();
+      final service = buildService(transport);
+      addTearDown(service.dispose);
+      await service.startMesh();
+
+      transport.emitIncomingConnection(
+        'peer-9',
+        'Impostor',
+        presentedName: 'mesh:v1:wrongSecret:Impostor',
+      );
       await Future<void>.delayed(Duration.zero);
 
       expect(transport.rejected, contains('peer-9'));
-      expect(
-        service.peers.where((p) => p.endpointId == 'peer-9'),
-        isEmpty,
+      expect(service.peers.where((p) => p.endpointId == 'peer-9'), isEmpty);
+    });
+
+    test('rejects an unrelated app on the same service id', () async {
+      final transport = FakeTransport();
+      final service = buildService(transport);
+      addTearDown(service.dispose);
+      await service.startMesh();
+
+      // Advertises our service id but presents no mesh credential at all.
+      transport.emitIncomingConnection(
+        'peer-9',
+        'SomeOtherApp',
+        presentedName: 'SomeOtherApp',
       );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(transport.rejected, contains('peer-9'));
+    });
+
+    test('advertises and scans under the credential name', () async {
+      final transport = FakeTransport();
+      final service = buildService(transport);
+      addTearDown(service.dispose);
+
+      await service.startMesh();
+
+      expect(
+        transport.advertiseNickName,
+        FakeTransport.presentedNameOf('PixelA'),
+      );
+      expect(transport.discoveryNickName, transport.advertiseNickName);
+    });
+
+    test('requests a connection under the credential name', () async {
+      final transport = FakeTransport();
+      final service = buildService(transport);
+      addTearDown(service.dispose);
+      await service.startMesh();
+      transport.emitEndpointFound('peer-1', 'PixelB');
+
+      await service.pairWith(service.peers.first);
+
+      expect(
+        transport.requestedNickName,
+        FakeTransport.presentedNameOf('PixelA'),
+      );
+    });
+
+    test('the outgoing echo does not trigger a self accept', () async {
+      final transport = FakeTransport();
+      final service = buildService(transport);
+      addTearDown(service.dispose);
+      await service.startMesh();
+      transport.emitEndpointFound('peer-1', 'PixelB');
+      await service.pairWith(service.peers.first);
+
+      // Our own request is echoed back; the remote side is the only acceptor.
+      transport.emitOutgoingConnectionEcho('peer-1', 'PixelA');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(transport.accepted, isEmpty);
     });
 
     test('a connected result marks the peer connected', () async {
@@ -432,7 +536,7 @@ void main() {
       final service = buildService(transport);
       addTearDown(service.dispose);
       await service.startMesh();
-      transport.emitIncomingConnection('peer-1', 'PixelB', 'mesh:t');
+      transport.emitIncomingConnection('peer-1', 'PixelB');
       await Future<void>.delayed(Duration.zero);
 
       await service.disconnect(service.peers.first);
@@ -464,8 +568,8 @@ void main() {
       final service = buildService(transport);
       addTearDown(service.dispose);
       await service.startMesh();
-      transport.emitIncomingConnection('peer-1', 'PixelB', 'mesh:t');
-      transport.emitIncomingConnection('peer-2', 'PixelC', 'mesh:t');
+      transport.emitIncomingConnection('peer-1', 'PixelB');
+      transport.emitIncomingConnection('peer-2', 'PixelC');
       await Future<void>.delayed(Duration.zero);
 
       await service.send('hello everyone');
@@ -484,8 +588,8 @@ void main() {
       final service = buildService(transport);
       addTearDown(service.dispose);
       await service.startMesh();
-      transport.emitIncomingConnection('peer-1', 'PixelB', 'mesh:t');
-      transport.emitIncomingConnection('peer-2', 'PixelC', 'mesh:t');
+      transport.emitIncomingConnection('peer-1', 'PixelB');
+      transport.emitIncomingConnection('peer-2', 'PixelC');
       await Future<void>.delayed(Duration.zero);
 
       await service.send('just you', only: service.peers.first);
@@ -503,7 +607,7 @@ void main() {
       final service = buildService(transport);
       addTearDown(service.dispose);
       await service.startMesh();
-      transport.emitIncomingConnection('peer-1', 'PixelB', 'mesh:t');
+      transport.emitIncomingConnection('peer-1', 'PixelB');
       await Future<void>.delayed(Duration.zero);
 
       await service.send('   ');
@@ -519,7 +623,7 @@ void main() {
       final service = buildService(transport);
       addTearDown(service.dispose);
       await service.startMesh();
-      transport.emitIncomingConnection('peer-1', 'PixelB', 'mesh:t');
+      transport.emitIncomingConnection('peer-1', 'PixelB');
       await Future<void>.delayed(Duration.zero);
 
       final inbound = MeshMessage.chat(
@@ -554,7 +658,7 @@ void main() {
       final service = buildService(transport);
       addTearDown(service.dispose);
       await service.startMesh();
-      transport.emitIncomingConnection('peer-1', 'unnamed', 'mesh:t');
+      transport.emitIncomingConnection('peer-1', 'unnamed');
       await Future<void>.delayed(Duration.zero);
 
       transport.emitPayload(
@@ -571,7 +675,7 @@ void main() {
       addTearDown(service.dispose);
       await service.startMesh();
 
-      transport.emitIncomingConnection('peer-1', 'PixelB', 'mesh:t');
+      transport.emitIncomingConnection('peer-1', 'PixelB');
       await Future<void>.delayed(Duration.zero);
 
       expect(transport.sent, isNotEmpty);
@@ -588,7 +692,7 @@ void main() {
       final service = buildService(transport);
       addTearDown(service.dispose);
       await service.startMesh();
-      transport.emitIncomingConnection('peer-1', 'PixelB', 'mesh:t');
+      transport.emitIncomingConnection('peer-1', 'PixelB');
       await Future<void>.delayed(Duration.zero);
       transport.failNext = true;
 

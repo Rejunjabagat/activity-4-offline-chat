@@ -24,6 +24,18 @@ class MeshChatService extends ChangeNotifier {
   /// Must match on every device in the mesh for peers to find each other.
   static const String serviceId = 'com.student.portfolio.meshchat';
 
+  /// Protocol marker prefixed to the name a device presents over the radio.
+  static const String protocolTag = 'mesh:v1';
+
+  /// Shared pairing secret. Only devices that present it are allowed to join the
+  /// mesh, so an unrelated app advertising on the same Wi-Fi is rejected.
+  ///
+  /// This travels in the endpoint name rather than
+  /// [ConnectionInfo.authenticationToken], because the two-argument
+  /// `NearbyConnections.requestConnection` overload used by the plugin builds
+  /// its `ConnectionInfo` with no token, so that field always arrives empty.
+  static const String pairingSecret = '7Qm2Vt9Kc4Xp';
+
   static const int _maxTranscript = 200;
 
   final MeshTransport _transport;
@@ -43,6 +55,19 @@ class MeshChatService extends ChangeNotifier {
     String? localName,
   })  : _transport = transport ?? NearbyTransport(),
         _localName = localName ?? 'MeshPeer';
+
+  /// The name this device presents to peers. Carries the protocol marker and
+  /// pairing secret so the remote side can authorise the handshake, and ends
+  /// with the human-readable device name.
+  String get _presentedName => '$protocolTag:$pairingSecret:$_localName';
+
+  /// Strips the credential off a presented name, leaving the friendly name.
+  static String _friendlyName(String presented) {
+    if (presented.startsWith('$protocolTag:$pairingSecret:')) {
+      return presented.substring(protocolTag.length + pairingSecret.length + 2);
+    }
+    return presented;
+  }
 
   // ---------------------------------------------------------------------
   // Radial state
@@ -78,7 +103,7 @@ class MeshChatService extends ChangeNotifier {
 
     if (!_advertising) {
       final ok = await _guard(() => _transport.startAdvertising(
-            nickName: _localName,
+            nickName: _presentedName,
             strategy: Strategy.P2P_CLUSTER,
             serviceId: serviceId,
             onConnectionInitiated: _onConnectionInitiated,
@@ -95,7 +120,7 @@ class MeshChatService extends ChangeNotifier {
 
     if (!_discovering) {
       final ok = await _guard(() => _transport.startDiscovery(
-            nickName: _localName,
+            nickName: _presentedName,
             strategy: Strategy.P2P_CLUSTER,
             serviceId: serviceId,
             onEndpointFound: _onEndpointFound,
@@ -146,12 +171,14 @@ class MeshChatService extends ChangeNotifier {
     if (serviceId != MeshChatService.serviceId) return;
     if (_peers.containsKey(endpointId)) return;
 
+    // Discovery is broadcast on the open service id, so a peer may be any
+    // instance of the app; only the handshake reveals whether it is one of ours.
     _peers[endpointId] = MeshPeer(
       endpointId: endpointId,
-      name: endpointName,
+      name: _friendlyName(endpointName),
       status: PeerStatus.discovered,
     );
-    _systemNote('Discovered "${_labelFor(endpointName, endpointId)}" nearby.');
+    _systemNote('Discovered "${_labelFor(_friendlyName(endpointName), endpointId)}" nearby.');
     notifyListeners();
   }
 
@@ -170,7 +197,7 @@ class MeshChatService extends ChangeNotifier {
     _systemNote('Pairing with "${peer.displayName}"...');
 
     final ok = await _guard(() => _transport.requestConnection(
-          nickName: _localName,
+          nickName: _presentedName,
           endpointId: peer.endpointId,
           onConnectionInitiated: _onConnectionInitiated,
           onConnectionResult: _onConnectionResult,
@@ -184,26 +211,32 @@ class MeshChatService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Incoming side: accept after verifying the offered token is a mesh peer.
+  /// Incoming side: accept only after the peer proves it speaks our protocol
+  /// and holds the shared pairing secret.
   Future<void> _onConnectionInitiated(
     String endpointId,
     ConnectionInfo connectionInfo,
   ) async {
-    final name = connectionInfo.endpointName;
+    // The requester advertises the same credential name, so it passes its own
+    // check. Only the receiving side has to decide.
+    if (!connectionInfo.isIncomingConnection) return;
+
+    final presented = connectionInfo.endpointName;
+    if (!presented.startsWith('$protocolTag:$pairingSecret:')) {
+      await _guard(() => _transport.rejectConnection(endpointId));
+      _peers.remove(endpointId);
+      _systemNote('Rejected an unknown device claiming to be "${_friendlyName(presented)}". '
+          'Wrong pairing secret.');
+      notifyListeners();
+      return;
+    }
+
+    final name = _friendlyName(presented);
     _peers[endpointId] = MeshPeer(
       endpointId: endpointId,
       name: name,
       status: PeerStatus.handshaking,
     );
-
-    final token = connectionInfo.authenticationToken;
-    if (!token.startsWith('mesh:')) {
-      await _guard(() => _transport.rejectConnection(endpointId));
-      _peers.remove(endpointId);
-      _systemNote('Rejected an unknown device claiming to be "$name".');
-      notifyListeners();
-      return;
-    }
 
     final accepted = await _guard(() => _transport.acceptConnection(
           endpointId,

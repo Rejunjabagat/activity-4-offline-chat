@@ -18,10 +18,17 @@ Connections API.
 1. **Local discovery** — the device both *advertises* its presence and *scans* for
    neighbours at the same time. Nearby Connections resolves the meeting, so
    whichever phone spots the other first wins the race to pair.
-2. **Connection & handshake** — when two devices see each other, the token
-   offered by the remote peer is checked before accepting. Anything not presenting
-   a valid mesh token is rejected, so a random app on the same network can't join.
-   On acceptance a direct peer-to-peer socket opens.
+2. **Connection & handshake** — every device advertises itself under a name
+   carrying a protocol marker and a shared pairing secret, e.g.
+   `mesh:v1:<secret>:PixelB`. When two devices see each other, the remote peer must
+   present that credential before the connection is accepted; anything else is
+   rejected, so a random app on the same Wi-Fi can't join. On acceptance a direct
+   peer-to-peer socket opens.
+
+   The credential rides in the endpoint name rather than the plugin's
+   `authenticationToken` field, because the two-argument
+   `NearbyConnections.requestConnection` overload the plugin calls builds its
+   `ConnectionInfo` with no token, leaving that field permanently empty.
 3. **Payload routing** — messages are newline-free JSON envelopes sent as byte
    payloads. Both sides decode defensively, so a malformed payload is logged and
    skipped instead of taking the session down.

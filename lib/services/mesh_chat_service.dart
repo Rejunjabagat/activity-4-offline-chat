@@ -500,6 +500,19 @@ class MeshChatService extends ChangeNotifier {
     );
   }
 
+  /// Seeds peers and transcript lines for layout tests, so a rendering
+  /// regression can be caught on the machine without two physical phones.
+  @visibleForTesting
+  void debugSeed({List<MeshPeer>? peers, List<String>? systemLines}) {
+    for (final peer in peers ?? const <MeshPeer>[]) {
+      _peers[peer.endpointId] = peer;
+    }
+    for (final line in systemLines ?? const <String>[]) {
+      _systemNote(line);
+    }
+    notifyListeners();
+  }
+
   @override
   void dispose() {
     _guardVoid(() async {

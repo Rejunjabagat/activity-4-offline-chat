@@ -487,19 +487,26 @@ class _SystemLine extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
       child: Row(
         children: [
-          const Expanded(child: Divider()),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
+          // Fixed-width rules: an Expanded divider cannot shrink below nothing
+          // usefully here, and letting the label grow is what overflowed the row.
+          const SizedBox(width: 12, child: Divider()),
+          const SizedBox(width: 10),
+          // Flexible, so a long notification wraps onto more lines instead of
+          // spilling past both edges of a narrow screen.
+          Expanded(
             child: Text(
               text,
               textAlign: TextAlign.center,
+              softWrap: true,
+              overflow: TextOverflow.visible,
               style: theme.textTheme.labelSmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
                 fontStyle: FontStyle.italic,
               ),
             ),
           ),
-          const Expanded(child: Divider()),
+          const SizedBox(width: 10),
+          const SizedBox(width: 12, child: Divider()),
         ],
       ),
     );

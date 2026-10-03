@@ -72,11 +72,31 @@ menu first.
 
 ### Permissions
 
-The manifest declares the modern permissions (`BLUETOOTH_SCAN`,
-`BLUETOOTH_ADVERTISE`, `BLUETOOTH_CONNECT`, `NEARBY_WIFI_DEVICES`) alongside the
-legacy location permissions, so it behaves correctly on both Android 12+ and older
-devices. The app degrades gracefully when a permission is denied: discovery simply
-stays inactive and the UI explains why, instead of crashing.
+The `nearby_connections` plugin requests nothing at runtime on your behalf, so
+`MainActivity` handles it over a `portfolio_app/nearby` method channel. On Start
+the app asks for the permissions this Android version actually needs, checks the
+OS location toggle, and reports exactly what is blocking if it still cannot start:
+
+- nothing held → prompt, then retry
+- held but the location switch is off → "Turn on Location" button
+- permanently denied → "Open Settings" button, since a second prompt would be ignored
+
+Declaring a permission is not enough on its own. Each of these had to be left
+uncapped in the manifest, because a `maxSdkVersion` limit makes Android silently
+refuse the runtime grant and Nearby Connections then fails with
+`MISSING_PERMISSION_*`:
+
+| Permission | Consequence if capped |
+|---|---|
+| `ACCESS_FINE_LOCATION` | no peers found on Android 12+ |
+| `ACCESS_WIFI_STATE` | `MISSING_PERMISSION_ACCESS_WIFI_STATE`, mesh never starts |
+
+`BLUETOOTH_SCAN` and `NEARBY_WIFI_DEVICES` are also declared without
+`neverForLocation`, since that flag suppresses the location grant that
+location-backed peer scanning depends on.
+
+NFC is intentionally not requested: the log warns about it during advertising,
+but peer-to-peer sockets use Bluetooth and local Wi-Fi, so it changes nothing.
 
 ## Tests
 

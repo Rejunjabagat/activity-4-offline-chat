@@ -9,6 +9,7 @@ import 'package:portfolio_app/services/mesh_chat_service.dart';
 import 'package:portfolio_app/services/mesh_chat_state.dart';
 import 'package:portfolio_app/services/mesh_message.dart';
 import 'package:portfolio_app/services/mesh_transport.dart';
+import 'package:portfolio_app/services/nearby_permissions.dart';
 
 /// Records everything the service sends so tests can assert on wire traffic
 /// and replay incoming payloads, without needing a real radio.
@@ -197,8 +198,45 @@ class FakeTransport implements MeshTransport {
   }
 }
 
-MeshChatService buildService(FakeTransport transport) =>
-    MeshChatService(transport: transport, localName: 'PixelA');
+/// Stands in for the platform permission channel, so tests describe an OS state
+/// instead of touching a real device.
+class FakePermissions extends NearbyPermissions {
+  FakePermissions(this.status);
+
+  NearbyPermissionStatus status;
+  int requestCount = 0;
+  int checkCount = 0;
+
+  @override
+  Future<NearbyPermissionStatus> request() async {
+    requestCount++;
+    return status;
+  }
+
+  @override
+  Future<NearbyPermissionStatus> check() async {
+    checkCount++;
+    return status;
+  }
+}
+
+/// Permissions granted and location on: the normal happy path.
+final NearbyPermissionStatus _granted = NearbyPermissionStatus(
+  granted: true,
+  missing: const [],
+  locationEnabled: true,
+  permanentlyDenied: false,
+);
+
+MeshChatService buildService(
+  FakeTransport transport, {
+  NearbyPermissions? permissions,
+}) =>
+    MeshChatService(
+      transport: transport,
+      permissions: permissions ?? FakePermissions(_granted),
+      localName: 'PixelA',
+    );
 
 void main() {
   group('MeshMessage wire format', () {
@@ -294,6 +332,94 @@ void main() {
       expect(service.peers.first.status, PeerStatus.discovered);
     });
 
+    group('runtime permissions', () {
+      test('requests permissions before touching the radio', () async {
+        final transport = FakeTransport();
+        final permissions = FakePermissions(_granted);
+        final service = buildService(transport, permissions: permissions);
+        addTearDown(service.dispose);
+
+        await service.startMesh();
+
+        expect(permissions.requestCount, 1);
+        expect(transport.advertising, isTrue);
+      });
+
+      test('does not advertise when permissions are refused', () async {
+        final transport = FakeTransport();
+        final permissions = FakePermissions(const NearbyPermissionStatus(
+          granted: false,
+          missing: ['android.permission.ACCESS_FINE_LOCATION'],
+          locationEnabled: true,
+          permanentlyDenied: false,
+        ));
+        final service = buildService(transport, permissions: permissions);
+        addTearDown(service.dispose);
+
+        final started = await service.startMesh();
+
+        expect(started, isFalse);
+        expect(transport.advertising, isFalse);
+        expect(transport.discovering, isFalse);
+        expect(service.state.permissionStatus.granted, isFalse);
+      });
+
+      test('does not scan when the location toggle is off', () async {
+        final transport = FakeTransport();
+        final permissions = FakePermissions(const NearbyPermissionStatus(
+          granted: true,
+          missing: [],
+          locationEnabled: false,
+          permanentlyDenied: false,
+        ));
+        final service = buildService(transport, permissions: permissions);
+        addTearDown(service.dispose);
+
+        final started = await service.startMesh();
+
+        // This is the case the user hit: permissions held, Location switch off.
+        expect(started, isFalse);
+        expect(transport.discovering, isFalse);
+        expect(service.state.permissionStatus.needsLocationToggle, isTrue);
+        expect(service.state.permissionHint, contains('Location is switched off'));
+      });
+
+      test('tells the user to visit settings after a permanent denial',
+          () async {
+        final transport = FakeTransport();
+        final permissions = FakePermissions(const NearbyPermissionStatus(
+          granted: false,
+          missing: ['android.permission.BLUETOOTH_SCAN'],
+          locationEnabled: false,
+          permanentlyDenied: true,
+        ));
+        final service = buildService(transport, permissions: permissions);
+        addTearDown(service.dispose);
+
+        await service.startMesh();
+
+        expect(service.state.permissionStatus.needsSettings, isTrue);
+        expect(service.state.permissionHint, contains('Open Settings'));
+      });
+
+      test('a refused start is not reported as a live mesh', () async {
+        final transport = FakeTransport();
+        final permissions = FakePermissions(const NearbyPermissionStatus(
+          granted: false,
+          missing: ['android.permission.BLUETOOTH_SCAN'],
+          locationEnabled: false,
+          permanentlyDenied: false,
+        ));
+        final service = buildService(transport, permissions: permissions);
+        addTearDown(service.dispose);
+
+        await service.startMesh();
+
+        expect(service.isActive, isFalse);
+        expect(service.state.transportLive, isFalse);
+      });
+    });
+
     test('ignores devices on a different service id', () async {
       final transport = FakeTransport();
       final service = buildService(transport);
@@ -345,15 +471,18 @@ void main() {
       expect(service.isActive, isFalse);
     });
 
-    test('reports a permission hint when the user denies nearby devices', () async {
+    test('a platform failure does not claim the permission was denied', () async {
       final transport = FakeTransport();
-      final service = buildService(transport);
+      final permissions = FakePermissions(_granted);
+      final service = buildService(transport, permissions: permissions);
       addTearDown(service.dispose);
       transport.denyAll = true;
 
       await service.startMesh();
 
-      expect(service.state.hasPermission, isFalse);
+      // Permissions really were granted, so the UI must not blame them: the
+      // radio refused for another reason and deserves an honest hint.
+      expect(service.state.hasPermission, isTrue);
       expect(service.state.permissionHint, isNotNull);
       expect(service.state.transportLive, isFalse);
       expect(service.isActive, isFalse);

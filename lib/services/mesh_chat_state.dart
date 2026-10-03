@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'mesh_message.dart';
+import 'nearby_permissions.dart';
 
 /// Connection state of a single peer in the mesh.
 enum PeerStatus { discovered, handshaking, connected, failed }
@@ -55,6 +56,10 @@ class MeshChatState {
   final String? permissionHint;
   final bool transportLive;
 
+  /// Fine-grained OS state, so the UI can say whether to prompt again or send
+  /// the user to system settings.
+  final NearbyPermissionStatus permissionStatus;
+
   const MeshChatState({
     this.advertising = false,
     this.discovering = false,
@@ -64,6 +69,7 @@ class MeshChatState {
     this.hasPermission = true,
     this.permissionHint,
     this.transportLive = false,
+    this.permissionStatus = NearbyPermissionStatus.unknown,
   });
 
   MeshChatState copyWith({
@@ -75,6 +81,7 @@ class MeshChatState {
     bool? hasPermission,
     String? permissionHint,
     bool? transportLive,
+    NearbyPermissionStatus? permissionStatus,
   }) =>
       MeshChatState(
         advertising: advertising ?? this.advertising,
@@ -85,6 +92,7 @@ class MeshChatState {
         hasPermission: hasPermission ?? this.hasPermission,
         permissionHint: permissionHint ?? this.permissionHint,
         transportLive: transportLive ?? this.transportLive,
+        permissionStatus: permissionStatus ?? this.permissionStatus,
       );
 
   int get connectedCount =>

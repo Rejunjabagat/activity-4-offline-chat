@@ -7,6 +7,7 @@ import 'package:nearby_connections/nearby_connections.dart';
 import 'mesh_chat_state.dart';
 import 'mesh_message.dart';
 import 'mesh_transport.dart';
+import 'nearby_permissions.dart';
 
 
 
@@ -39,6 +40,7 @@ class MeshChatService extends ChangeNotifier {
   static const int _maxTranscript = 200;
 
   final MeshTransport _transport;
+  final NearbyPermissions _permissions;
   final String _localName;
 
   bool _advertising = false;
@@ -46,14 +48,17 @@ class MeshChatService extends ChangeNotifier {
   bool _permission = true;
   String? _permissionHint;
   bool _transportLive = false;
+  NearbyPermissionStatus _permissionStatus = NearbyPermissionStatus.unknown;
 
   final Map<String, MeshPeer> _peers = {};
   final List<MeshLogEntry> _transcript = [];
 
   MeshChatService({
     MeshTransport? transport,
+    NearbyPermissions? permissions,
     String? localName,
   })  : _transport = transport ?? NearbyTransport(),
+        _permissions = permissions ?? NearbyPermissions(),
         _localName = localName ?? 'MeshPeer';
 
   /// The name this device presents to peers. Carries the protocol marker and
@@ -82,6 +87,7 @@ class MeshChatService extends ChangeNotifier {
         hasPermission: _permission,
         permissionHint: _permissionHint,
         transportLive: _transportLive,
+        permissionStatus: _permissionStatus,
       );
 
   List<MeshPeer> get peers => _peers.values.toList(growable: false);
@@ -98,8 +104,23 @@ class MeshChatService extends ChangeNotifier {
   Future<bool> startMesh() async {
     if (_advertising && _discovering) return true;
 
-    _permission = true;
-    _permissionHint = null;
+    // Request the dangerous permissions and re-check the location toggle before
+    // touching the radio. Without this the platform calls fail with a
+    // SecurityException and discovery finds nothing.
+    final status = await _permissions.request();
+    _permissionStatus = status;
+    _permission = status.granted;
+    _permissionHint = status.remedy;
+
+    if (!status.ready) {
+      _advertising = false;
+      _discovering = false;
+      _transportLive = false;
+      _systemNote(status.remedy ??
+          'Mesh could not start. Nearby devices and Location are required.');
+      notifyListeners();
+      return false;
+    }
 
     if (!_advertising) {
       final ok = await _guard(() => _transport.startAdvertising(
@@ -112,9 +133,13 @@ class MeshChatService extends ChangeNotifier {
           ));
       _advertising = ok;
       if (!ok) {
-        _permissionHint =
-            'Advertising blocked. Nearby devices permission is required.';
-        _permission = false;
+        // The radio refused even though permissions looked good, so re-read the
+        // real OS state rather than guessing at the cause.
+        await _refreshPermissionState();
+        _permissionHint ??= _permissionStatus.ready
+            ? 'Could not advertise on Bluetooth or Wi-Fi. Close other apps '
+                'using Nearby connections and press Start again.'
+            : 'Nearby devices and Location permissions are required.';
       }
     }
 
@@ -127,19 +152,45 @@ class MeshChatService extends ChangeNotifier {
             onEndpointLost: _onEndpointLost,
           ));
       _discovering = ok;
-      if (!ok && _permission) {
-        _permissionHint =
-            'Scanning blocked. Location and nearby devices permissions are required.';
-        _permission = false;
+      if (!ok) {
+        await _refreshPermissionState();
+        _permissionHint ??= _permissionStatus.ready
+            ? 'Could not scan for peers. Make sure Bluetooth and Wi-Fi are '
+                'switched on, then press Start again.'
+            : 'Nearby devices and Location permissions are required.';
       }
     }
 
     _transportLive = _advertising || _discovering;
-    _systemNote(_transportLive
-        ? 'Mesh active. Broadcasting as "$_localName" and scanning for peers.'
-        : 'Mesh could not start. Grant nearby devices permission and retry.');
+    if (_transportLive) {
+      _permission = true;
+      _permissionHint = null;
+      _systemNote('Mesh active. Broadcasting as "$_localName" and scanning for peers.');
+    } else {
+      _systemNote(_permissionHint ??
+          'Mesh could not start. Grant nearby devices permission and retry.');
+    }
     notifyListeners();
     return _transportLive;
+  }
+
+  /// Re-reads permission and location state from the OS, keeping any message
+  /// already shown if there is nothing actionable.
+  Future<void> _refreshPermissionState() async {
+    _permissionStatus = await _permissions.check();
+    _permission = _permissionStatus.granted;
+    if (_permissionStatus.remedy != null) {
+      _permissionHint = _permissionStatus.remedy;
+    }
+  }
+
+  /// Current permission and location state, for the UI to show on open.
+  NearbyPermissionStatus get permissionStatus => _permissionStatus;
+
+  /// Re-checks without prompting, so the screen can show an accurate remedy.
+  Future<void> refreshPermissionStatus() async {
+    await _refreshPermissionState();
+    notifyListeners();
   }
 
   Future<void> stopMesh() async {

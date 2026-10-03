@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../services/mesh_chat_service.dart';
 import '../services/mesh_chat_state.dart';
+import '../services/nearby_permissions.dart';
 
 /// Activity 4: Local Mesh Chat.
 ///
@@ -102,7 +103,12 @@ class _LocalMeshChatScreenState extends State<LocalMeshChatScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
+            // Laid out as a Wrap so the Start/Stop button drops onto its own line on
+            // narrow screens instead of overflowing the status text.
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 Icon(
                   live ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
@@ -110,10 +116,14 @@ class _LocalMeshChatScreenState extends State<LocalMeshChatScreen> {
                       ? theme.colorScheme.primary
                       : theme.colorScheme.onSurfaceVariant,
                 ),
-                const SizedBox(width: 12),
-                Expanded(
+                SizedBox(
+                  // Intrinsic width of the text block, capped so it still wraps
+                  // on a small screen rather than forcing a horizontal overflow.
+                  width: (MediaQuery.sizeOf(context).width - 140)
+                      .clamp(160.0, 340.0),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(
                         live ? 'Mesh is live' : 'Mesh is offline',
@@ -164,25 +174,70 @@ class _LocalMeshChatScreenState extends State<LocalMeshChatScreen> {
                   ),
                 ),
             ],
-            if (!state.hasPermission && state.permissionHint != null) ...[
+            if (state.permissionHint != null) ...[
               const SizedBox(height: 10),
-              Row(
-                children: [
-                  Icon(
-                    Icons.warning_amber_rounded,
-                    size: 16,
-                    color: theme.colorScheme.error,
-                  ),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      state.permissionHint!,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.error,
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.errorContainer.withValues(alpha: 0.4),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.warning_amber_rounded,
+                      size: 18,
+                      color: theme.colorScheme.error,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            state.permissionHint!,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onErrorContainer,
+                            ),
+                          ),
+                          if (state.permissionStatus.needsLocationToggle ||
+                              state.permissionStatus.needsSettings) ...[
+                            const SizedBox(height: 8),
+                            Wrap(
+                              spacing: 8,
+                              children: [
+                                if (state.permissionStatus
+                                    .needsLocationToggle)
+                                  OutlinedButton.icon(
+                                    onPressed: () => NearbySystem()
+                                        .openLocationSettings(),
+                                    icon:
+                                        const Icon(Icons.my_location, size: 16),
+                                    label: const Text('Turn on Location'),
+                                  ),
+                                if (state.permissionStatus.needsSettings)
+                                  OutlinedButton.icon(
+                                    onPressed: () =>
+                                        NearbySystem().openAppSettings(),
+                                    icon: const Icon(Icons.settings, size: 16),
+                                    label: const Text('Open Settings'),
+                                  ),
+                                TextButton.icon(
+                                  onPressed: () async {
+                                    await service.refreshPermissionStatus();
+                                  },
+                                  icon: const Icon(Icons.refresh, size: 16),
+                                  label: const Text('Re-check'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ],
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ],
           ],

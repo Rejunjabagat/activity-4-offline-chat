@@ -3,18 +3,28 @@
          Wi-Fi / Bluetooth discovery and peer-to-peer sockets. -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="30" />
+
+    <!-- Location is NOT capped at API 30. Nearby Connections still performs
+         location-backed Wi-Fi peer scanning on Android 12+, so capping it here
+         made the runtime request for a permission the app had not declared,
+         which is silently refused and leaves discovery finding nothing. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <!-- Android 12+ (API 31+) nearby-device permissions -->
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />
+    <!-- Location-backed Wi-Fi scanning on API 31+. Deliberately declared WITHOUT
+         neverForLocation: the nearby_connections plugin needs real location to
+         enumerate peers, and that flag suppresses the location grant the plugin
+         relies on. -->
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
 
-    <!-- Legacy Wi-Fi scan so local-network peers are visible pre-API 31 -->
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" android:maxSdkVersion="32" />
+    <!-- The plugin fails with MISSING_PERMISSION_ACCESS_WIFI_STATE if these are
+         capped off on API 33+, which Android 13 and 14 devices report. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
